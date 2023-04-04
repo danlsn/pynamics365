@@ -3,3 +3,6 @@
 /pynamics365/.env
 /pynamics365/.environment.json
 /pynamics365/entity.log
+/pynamics365/pynamics365_cache.sqlite
+/.env
+/pynamics365/token.json
