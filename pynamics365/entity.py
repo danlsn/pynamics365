@@ -165,6 +165,20 @@ class DynamicsEntityExtractor(DynamicsEntity):
         self.pages = []
         self.records = []
 
+    def get_pages(self, url, params=None, **kwargs):
+        if self.token_expired():
+            self.refresh_token()
+        while url:
+            response = requests.get(url, headers=self.headers, params=params, **kwargs)
+            response.raise_for_status()
+            data = response.json()
+            yield data
+            url = data.get('@odata.nextLink')
+
+    def get_records(self, url, params=None, **kwargs):
+        for page in self.get_pages(url, params, **kwargs):
+            yield from page['value']
+
     def get_all_records(self, **kwargs):
         if not self.endpoint:
             self._get_endpoint()

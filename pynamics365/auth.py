@@ -19,18 +19,8 @@ class DynamicsAuth:
     header = None
     save_token = None
 
-    def __init__(self, auth_url=None, save_token=True, **kwargs):
-        self.token_path = None
-        load_dotenv()
-        self.authenticate(**kwargs)
-        self.save_token = save_token or True
-        self.token = self.get_token()
-        mandatory_fields = ['auth_url', 'grant_type', 'resource', 'client_id', 'username', 'password']
-        for field in mandatory_fields:
-            if not getattr(self, field):
-                raise Exception(f"Missing field: {field}")
-
-    def authenticate(self, auth_url=None, grant_type="password", resource=None, client_id=None, username=None, password=None, token_path=None):
+    def __init__(self, auth_url=None, grant_type="password", resource=None, client_id=None, username=None,
+                 password=None, token_path=None, save_token=True, **kwargs):
         load_dotenv()
         self.auth_url = auth_url or os.getenv('MSDYN_AUTH_URL')
         self.grant_type = grant_type or os.getenv('MSDYN_GRANT_TYPE')
@@ -39,22 +29,33 @@ class DynamicsAuth:
         self.username = username or os.getenv('MSDYN_USERNAME')
         self.password = password or os.getenv('MSDYN_PASSWORD')
         self.token_path = token_path or os.getenv('MSDYN_TOKEN_PATH')
+        mandatory_fields = ['auth_url', 'grant_type', 'resource', 'client_id', 'username', 'password']
+        for field in mandatory_fields:
+            if not getattr(self, field):
+                raise Exception(f"Missing field: {field}")
+        self.save_token = save_token or True
+        self.token = self.get_token()
+
+    def authenticate(self):
+        load_dotenv()
+
         self.token = self.get_token()
 
     def get_token(self, use_saved_token=True, save_token=True):
-        try:
-            with open(self.token_path) as f:
-                token = json.load(f)
-                self.last_refresh = int(time.time())
-                self.expires_on = int(token['expires_on'])
-                if time.time() < self.expires_on:
-                    self.token = token['access_token']
-                    self.header = {
-                        "Authorization": f"Bearer {self.token}",
-                    }
-                    return token['access_token']
-        except FileNotFoundError:
-            return self.get_token(use_saved_token=False)
+        if use_saved_token:
+            try:
+                with open(self.token_path) as f:
+                    token = json.load(f)
+                    self.last_refresh = int(time.time())
+                    self.expires_on = int(token['expires_on'])
+                    if time.time() < self.expires_on:
+                        self.token = token['access_token']
+                        self.header = {
+                            "Authorization": f"Bearer {self.token}",
+                        }
+                        return token['access_token']
+            except FileNotFoundError:
+                return self.get_token(use_saved_token=False)
         payload = {'grant_type': 'password', 'resource': self.resource,
                    'client_id': self.client_id, 'username': self.username,
                    'password': self.password}
@@ -62,15 +63,15 @@ class DynamicsAuth:
         response = requests.request("POST", self.auth_url, data=payload, headers=headers)
         if response.status_code != 200:
             raise Exception(response.text)
-        if self.save_token:
+        if self.save_token or save_token:
             with open(self.token_path, 'w') as f:
                 json.dump(response.json(), f)
         self.last_refresh = int(time.time())
         self.expires_on = int(response.json()['expires_on'])
         self.token = response.json()['access_token']
         self.header = {
-                    "Authorization": f"Bearer {self.token}",
-                }
+            "Authorization": f"Bearer {self.token}",
+        }
         return self.token
 
     def get_header(self):

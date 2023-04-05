@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 # import requests_cache
@@ -11,12 +12,17 @@ from dotenv import load_dotenv
 
 from pynamics365.auth import DynamicsAuth
 
+
 # requests_cache.install_cache('pynamics365_cache')
 
 
 class DynamicsClient:
-    def __init__(self, auth=None, **kwargs):
+    def __init__(self, auth: DynamicsAuth = None, **kwargs):
         self.auth = auth or DynamicsAuth(**kwargs)
+        self.base_url = f"{self.auth.resource}/api/data/v9.2"
+        self.environment = self._set_environment()
+        self.last_refresh = self.auth.last_refresh
+        self.expires_on = self.auth.expires_on
         self.auth_token = f"Bearer {self.auth.token}"
         self.headers = {
             "Authorization": self.auth_token,
@@ -26,9 +32,11 @@ class DynamicsClient:
             "OData-MaxVersion": "4.0",
             "OData-Version": "4.0",
         }
-        self.base_url = f"{self.auth.resource}/api/data/v9.2"
-        self.last_refresh = self.auth.last_refresh
-        self.expires_on = self.auth.expires_on
+
+    def _set_environment(self):
+        resource_url = urlparse(self.auth.resource)
+        # Replace periods with underscores
+        return resource_url.netloc.replace('.', '_')
 
     def get(self, url, params=None, **kwargs):
         if self.token_expired():
@@ -68,7 +76,8 @@ class DynamicsClient:
         response.raise_for_status()
         return response.json()
 
-    def get_entity(self, entity_name, entity_id, select=None, filter=None, expand=None, top=None, orderby=None, count=False):
+    def get_entity(self, entity_name, entity_id, select=None, filter=None, expand=None, top=None, orderby=None,
+                   count=False):
         url = f"{self.base_url}/{entity_name}({entity_id})"
         params = {}
         if select:
@@ -86,3 +95,12 @@ class DynamicsClient:
         response = self.get(url, params=params)
         response.raise_for_status()
         return response.json()
+
+
+def main():
+    ...
+
+
+if __name__ == "__main__":
+    main()
+
