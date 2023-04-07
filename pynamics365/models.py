@@ -1,9 +1,19 @@
 import json
 import os
+import pickle
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 import logging
+
+import aiofiles
 import pandas as pd
 import requests
+import requests_cache
+import asyncio
+import aiohttp
+from aiopath import AsyncPath
+from tqdm.asyncio import tqdm
 
 from pynamics365.client import DynamicsClient
 
@@ -18,14 +28,16 @@ ch = logging.StreamHandler()
 ch.setLevel(logging.INFO)
 fh.setFormatter(formatter)
 ch.setFormatter(formatter)
-logger.addHandler(ch)
+# logger.addHandler(ch)
 logger.addHandler(fh)
 logger.setLevel(logging.DEBUG)
 
 
 class DynamicsEntity:
     def __init__(self, dc: DynamicsClient, logical_name, **kwargs):
+        self.params = None
         self.dc = dc or DynamicsClient(**kwargs)
+        self.environment = self.dc.environment
         self.entity_definition = None
         self.base_url = self.dc.base_url
         self.logical_name = logical_name
@@ -42,9 +54,43 @@ class DynamicsEntity:
         }
         self.record_count = self.get_record_count()
         self.est_pages = (self.record_count // self.per_page) + 1
-        self.pages = self.get_pages()
-        self.records = self.get_records()
+        self.pages = None
+        self.records = None
+        self.last_updated = int(time.time())
+        self.filter = kwargs.get("filter", None)
         logger.info(f"Initialized {self.__class__.__name__} for {self.logical_name}")
+
+    def set_filter(self, type, value, unit):
+        if type == 'before':
+            type = 'lt'
+        elif type == 'after':
+            type = 'gt'
+        else:
+            return
+        filter_candidates = ['modifiedon', 'createdon', 'scheduledstart']
+        attribute_names = [a['LogicalName'] for a in self.attributes if a['LogicalName'] in filter_candidates]
+        if attribute_names:
+            attribute_name = attribute_names[0]
+        else:
+            logger.warning(f"Could not find a suitable attribute for filtering. Candidates: {filter_candidates}")
+            return
+        if unit == 'days':
+            value = datetime.now() - timedelta(days=value)
+            value = value.strftime('%Y-%m-%dT00:00:00Z')
+        else:
+            return
+        self.filter = f"{attribute_name} {type} {value}"
+        self.params = {"$filter": self.filter}
+
+    def update(self):
+        if int(time.time()) - self.last_updated < 3600:
+            return
+        self.record_count = self.get_record_count()
+        self.est_pages = (self.record_count // self.per_page) + 1
+        self.pages = None
+        self.records = None
+        self.last_updated = int(time.time())
+        logger.info(f"Updated {self.__class__.__name__} for {self.logical_name}")
 
     def get_all_pages(self):
         page = 1
@@ -67,7 +113,10 @@ class DynamicsEntity:
     def get_all_records(self):
         page = 1
         if not self.endpoint:
-            self.get_endpoint()
+            endpoint = self.get_endpoint()
+            if not endpoint:
+                logger.warning(f"No endpoint found for {self.logical_name}")
+                return
         url = f"{self.base_url}/{self.endpoint}"
         response = self.dc.get(url)
         response.raise_for_status()
@@ -84,19 +133,36 @@ class DynamicsEntity:
         return self.records
 
     def get_pages(self, params=None, **kwargs):
-        if self.dc.token_expired():
-            self.dc.refresh_token()
+        if not params:
+            params = self.params
+
         if not self.endpoint:
-            self.get_endpoint()
+            endpoint = self.get_endpoint()
+            if not endpoint:
+                logger.warning(f"No endpoint found for {self.logical_name}")
+                return
         url = f"{self.base_url}/{self.endpoint}"
+        page_num = 0
         while url:
+            page_num += 1
+            if self.dc.token_expired():
+                self.dc.refresh_token()
+            self.headers['Authorization'] = self.dc.auth_token
+            logger.info(f"Getting page {page_num}/{self.est_pages} of {self.logical_name}")
             response = requests.get(url, headers=self.headers, params=params, **kwargs)
-            response.raise_for_status()
+            if response.status_code == 401:
+                logger.info("Token expired. Refreshing token.")
+                self.dc.refresh_token()
+                response = requests.get(url, headers=self.headers, params=params, **kwargs)
             data = response.json()
+            if isinstance(response, requests_cache.CachedResponse):
+                logger.debug(f"Got page {page_num}/{self.est_pages} from cache")
             yield data
             url = data.get('@odata.nextLink')
 
     def save_pages(self, output_path="../data", params=None, **kwargs):
+        if not params:
+            params = self.params
         logger.info(f"Saving est. {self.est_pages} pages of {self.logical_name}")
         output_path = Path(output_path) / self.dc.environment / self.logical_name
         logger.info(f"Saving to {output_path}")
@@ -114,8 +180,11 @@ class DynamicsEntity:
         logger.info(f"Save complete for {self.logical_name}. Got {num_records} records from {page_number} pages.")
 
     def get_records(self, params=None, **kwargs):
+        if not params:
+            params = self.params
         for page in self.get_pages(params, **kwargs):
-            yield from page['value']
+            if 'value' in page:
+                yield from page['value']
 
     def get_entity_definition(self):
         url = f"{self.base_url}/EntityDefinitions(LogicalName='{self.logical_name}')"
@@ -128,17 +197,20 @@ class DynamicsEntity:
         if not self.entity_definition:
             self.get_entity_definition()
         names = {
-            "LogicalName": self.entity_definition['LogicalName'],
-            "DisplayName": self.entity_definition['DisplayName']['UserLocalizedLabel']['Label'],
-            "DisplayCollectionName": self.entity_definition['DisplayCollectionName']['UserLocalizedLabel']['Label'],
-            "SchemaName": self.entity_definition['SchemaName'],
-            # "CollectionName": self.entity_definition['CollectionName'],
-            "CollectionSchemaName": self.entity_definition['CollectionSchemaName'],
-            "LogicalCollectionName": self.entity_definition['LogicalCollectionName'],
-            # "PhysicalName": self.entity_definition['PhysicalName'],
+            "LogicalName": safeget(self.entity_definition, 'LogicalName'),
+            "DisplayName": safeget(self.entity_definition, 'DisplayName', 'UserLocalizedLabel', 'Label'),
+            # "DisplayName": self.entity_definition.get('DisplayName', {}).get('UserLocalizedLabel', {}).get('Label'),
+            "DisplayCollectionName": safeget(self.entity_definition, 'DisplayCollectionName', 'UserLocalizedLabel',
+                                             'Label'),
+            # "DisplayCollectionName": self.entity_definition.get('DisplayCollectionName', {}).get('UserLocalizedLabel', {}).get('Label'),
+            "SchemaName": self.entity_definition.get('SchemaName'),
+            "CollectionName": self.entity_definition.get('CollectionName'),
+            "CollectionSchemaName": self.entity_definition.get('CollectionSchemaName'),
+            "LogicalCollectionName": self.entity_definition.get('LogicalCollectionName'),
+            "PhysicalName": self.entity_definition.get('PhysicalName'),
             # "ObjectTypeCode": self.entity_definition['ObjectTypeCode'],
-            # "BaseTableName": self.entity_definition['BaseTableName'],
-            "EntitySetName": self.entity_definition['EntitySetName'],
+            # "BaseTableName": self.entity_definition.get('BaseTableName'],
+            "EntitySetName": self.entity_definition.get('EntitySetName'),
             # "PrimaryIdAttribute": self.entity_definition['PrimaryIdAttribute'],
             # "PrimaryNameAttribute": self.entity_definition['PrimaryNameAttribute'],
         }
@@ -187,25 +259,107 @@ class DynamicsEntity:
         return self.record_count
 
 
-class DynamicsExtractor(DynamicsEntity):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+class DynamicsExtractor:
+    def __init__(self, de: DynamicsEntity, **kwargs):
+        self.de = de
+
         self.output_path = kwargs.get("output_path", "../data")
 
     def save_all_pages(self):
         ...
 
 
+def safeget(input, *args):
+    if not input:
+        return None
+    if len(args) == 0:
+        return input
+    try:
+        return safeget(input[args[0]], *args[1:])
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def extract_all_entities(dc, output_path="../data"):
+    # requests_cache.install_cache("dynamics_cache", backend="sqlite", expire_after=3600)
+    logger.info(f"Extracting all entities from {dc.environment}")
+    url = f"{dc.base_url}/EntityDefinitions"
+    response = dc.get(url)
+    response.raise_for_status()
+    entities = response.json()['value']
+    entity_definitions = {}
+    # entity_pkl_names = []
+    # for pkl in Path("../pkl/entity_definitions").rglob("*.pkl"):
+    #     with open(pkl, 'rb') as f:
+    #         pkl = pickle.load(f)
+    #         entity_pkl_names.append(pkl['LogicalName'])
+    #         entity_definitions[pkl['LogicalName']] = pkl
+    entities = [e for e in entities if e['LogicalName'] in ['contact', 'account', 'opportunity', 'lead', 'systemuser']]
+    for entity in entities:
+        logical_name = entity['LogicalName']
+        if logical_name in entity_definitions.keys():
+            logger.info(f"Unpickling {logical_name} as it has already been extracted")
+            de = entity_definitions[logical_name]
+        else:
+            de = DynamicsEntity(dc=dc, logical_name=entity['LogicalName'])
+            # pickle_entity(de)
+        de.save_pages(output_path=output_path) if de.record_count > 0 else logger.info(
+            f"Skipping {de.logical_name} as it has no records")
+
+    for de in entity_definitions:
+        de.save_pages(output_path=output_path) if de.record_count > 0 else logger.info(
+            f"Skipping {de.logical_name} as it has no records")
+
+
+def pickle_all_entities(dc, output_path="../pkl"):
+    requests_cache.install_cache("dynamics_cache", backend="sqlite", expire_after=3600)
     logger.info(f"Extracting all entities from {dc.environment}")
     url = f"{dc.base_url}/EntityDefinitions"
     response = dc.get(url)
     response.raise_for_status()
     entities = response.json()['value']
     for entity in entities:
-        de = DynamicsExtractor(dc=dc, logical_name=entity['LogicalName'])
-        de.save_pages(output_path=output_path) if de.record_count else logger.info(
-            f"Skipping {de.logical_name} as it has no records")
+        de = DynamicsEntity(dc=dc, logical_name=entity['LogicalName'])
+        # Pickle the entity definition
+        filename = Path(f"{output_path}/entity_definitions/{de.logical_name}.pkl")
+        filename.parent.mkdir(parents=True, exist_ok=True)
+        with open(filename, 'wb') as f:
+            logger.info(f"Pickling {de.logical_name} to {filename}")
+            pickle.dump(de, f)
+
+
+def pickle_entity(de, overwrite=True, output_path="../pkl"):
+    logger.info(f"Pickling {de.logical_name} from {de.environment} to {output_path}")
+    filename = Path(f"{output_path}/entity_definitions/{de.logical_name}.pkl")
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    with open(filename, 'wb') as f:
+        logger.info(f"Pickling {de.logical_name} to {filename}")
+        pickle.dump(de, f)
+
+
+async def apickle_entity(dc, logical_name, overwrite=True, output_path="../pkl"):
+    de = DynamicsEntity(dc=dc, logical_name=logical_name)
+    logger.info(f"Extracting {de.logical_name} from {de.environment} asynchronously")
+    # Pickle the entity definition
+    filename = AsyncPath(f"{output_path}/entity_definitions/{de.logical_name}.pkl")
+    await filename.parent.mkdir(parents=True, exist_ok=True)
+    if await filename.exists() and not overwrite:
+        logger.info(f"Skipping {de.logical_name} as it has already been extracted")
+        return
+    async with aiofiles.open(filename, 'wb') as f:
+        logger.info(f"Pickling {de.logical_name} to {filename}")
+        await f.write(pickle.dumps(de))
+
+
+async def apickle_all_entities(dc, output_path="../pkl"):
+    logger.info(f"Extracting all entities from {dc.environment} asynchronously")
+    url = f"{dc.base_url}/EntityDefinitions"
+    response = await dc.get_async(url)
+    entities = response['value']
+    tasks = []
+    for entity in entities:
+        tasks.append(apickle_entity(dc, entity['LogicalName'], output_path=output_path))
+    await asyncio.gather(*tasks)
 
 
 def new_client_test():
@@ -278,8 +432,11 @@ def main():
 def test_extract():
     load_dotenv()
     dc = DynamicsClient()
+    # pickle_all_entities(dc)
     extract_all_entities(dc)
 
 
 if __name__ == "__main__":
+    dc = DynamicsClient()
+    # asyncio.run(apickle_all_entities(dc, output_path="../pkl"))
     test_extract()

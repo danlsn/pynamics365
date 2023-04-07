@@ -4,7 +4,10 @@ from datetime import datetime, timedelta
 import time
 from pathlib import Path
 from urllib.parse import urlparse
-
+import asyncio
+import aiohttp
+import aiopath
+import aiofiles
 import pandas as pd
 # import requests_cache
 import requests
@@ -42,6 +45,13 @@ class DynamicsClient:
         if self.token_expired():
             self.refresh_token()
         return requests.get(url, headers=self.headers, params=params, **kwargs)
+
+    async def get_async(self, url, params=None, **kwargs):
+        if self.token_expired():
+            self.refresh_token()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=self.headers, params=params, **kwargs) as response:
+                return await response.json()
 
     def post(self, url, data=None, **kwargs):
         if self.token_expired():
