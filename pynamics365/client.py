@@ -259,6 +259,17 @@ class DynamicsSession(requests.Session):
                 records.append(page)
         return records
 
+    def gen_all_records(self, url, params=None):
+        params = params or self.params
+        for page in self.pages(url, params=params):
+            try:
+                yield from page['value']
+            except KeyError:
+                if isinstance(page, list):
+                    yield from page
+                else:
+                    yield page
+
 
 def extract_all_pages_to_json(dc, entity_definition, output_path=None):
     dc.authenticate()
@@ -281,7 +292,7 @@ def extract_all_pages_to_json(dc, entity_definition, output_path=None):
         return None
     logger.info(f"Extracting all pages for {entity_name}")
     resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    output_path = output_path or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
+    output_path = f"{output_path}/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
     output_path = Path(output_path)
     page_number = 0
     for page in dc.pages(entity_name):
@@ -329,7 +340,7 @@ def extract_all_pages_to_csv(dc, entity_definition, output_path=None):
         return None
     logger.info(f"Extracting all pages for {entity_name}")
     resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    output_path = output_path or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
+    output_path = f"{output_path}/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
     output_path = Path(output_path)
     page_number = 0
     for page in dc.pages(entity_name):
@@ -359,6 +370,65 @@ def entity_attrs_to_csv(dc, entity_name, filename=None, **kwargs):
     return filename
 
 
+def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
+    dc.authenticate()
+    candidate_names = set()
+    for key, value in entity_definition.items():
+        if isinstance(value, dict):
+            continue
+        if "Name" in key and value:
+            candidate_names.add(value.lower())
+    entity_name = None
+    # Sort candidate names by length descending
+    for name in sorted(candidate_names, key=len, reverse=True):
+        one_record = dc.get(name, params={"$top": 1})
+        if one_record.status_code == 200:
+            entity_name = name
+            logger.debug(f"Found endpoint for entity: {entity_name}")
+            break
+    if not entity_name:
+        logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
+        return None
+    logger.info(f"Extracting all records for {entity_name}")
+    resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
+    filename = filename or f"../data/jsonl/{resource_path_name}/{entity_definition['LogicalName']}.jsonl"
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    if entity_name is None:
+        logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
+        return None
+    with open(filename, "a") as f:
+        for record in dc.get_all_records(entity_name, **kwargs):
+            prepared_record = {}
+            for key, value in record.items():
+                key = prepare_key_for_header(key)
+                if isinstance(value, dict):
+                    prepared_record[key] = json.dumps(value)
+                else:
+                    prepared_record[key] = value
+            f.write(json.dumps(prepared_record))
+            f.write('\n')
+    # Delete filename if empty
+    if filename.stat().st_size == 0:
+        filename.unlink()
+        logger.warning(f"Deleted empty file {filename}")
+        return None
+    else:
+        # Deduplicate file
+        logger.info(f"Deduplicating file {filename}")
+        with open(filename, "r") as f:
+            lines = f.readlines()
+            length_original = len(lines)
+            logger.info(f"Found {len(lines)} lines in file {filename}")
+        lines = list(set(lines))
+        length_deduplicated = len(lines)
+        with open(f"{filename}.temp", "w") as f:
+            f.writelines(lines)
+        os.rename(f"{filename}.temp", filename)
+        logger.info(f"Done deduplicating file {filename}. Removed {length_original - length_deduplicated} lines.")
+    return filename
+
+
 def main():
     dc = DynamicsSession()
     dc.set_page_size(1000)
@@ -366,13 +436,14 @@ def main():
     df = pd.json_normalize(entity_definitions)
     df.set_index('LogicalName', inplace=True)
     df.to_csv("../docs/entity_definitions.csv")
-
+    output_path = "/Users/danlsn/Library/CloudStorage/GoogleDrive-dan@pinchpoint.com.au/My Drive/DATABASE/MIP/mipcrm-extract/full"
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
         for entity_definition in entity_definitions:
             # futures.append(executor.submit(entity_attrs_to_csv, dc, entity_name))
-            futures.append(executor.submit(extract_all_pages_to_csv, dc, entity_definition))
-            futures.append(executor.submit(extract_all_pages_to_json, dc, entity_definition))
+            futures.append(executor.submit(extract_entities_to_jsonl, dc, entity_definition))
+            # futures.append(executor.submit(extract_all_pages_to_csv, dc, entity_definition, output_path))
+            # futures.append(executor.submit(extract_all_pages_to_json, dc, entity_definition, output_path))
         for future in concurrent.futures.as_completed(futures):
             try:
                 logger.info(f"Completed: {future.result()}")
