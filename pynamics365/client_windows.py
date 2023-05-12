@@ -1,4 +1,6 @@
+import copy
 import csv
+import random
 import sys
 import concurrent
 import json
@@ -12,27 +14,43 @@ import aiohttp
 import aiopath
 import aiofiles
 import pandas as pd
+
 # import requests_cache
 import requests
+
 # from rich import print
 from dotenv import load_dotenv
 import logging
 from pynamics365.auth import DynamicsAuth
+from pynamics365.ddb_loader import load_many_entity_records_to_ddb
 
 load_dotenv()
-
 
 # requests_cache.install_cache('pynamics365_cache')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
-ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s'))
-fh = logging.FileHandler('../logs/pynamics365.log')
-fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s'))
+ch.setFormatter(
+    logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s"
+    )
+)
+fh = logging.FileHandler("../logs/pynamics365.log")
+fh.setFormatter(
+    logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s"
+    )
+)
 fh.setLevel(logging.INFO)
 logger.addHandler(ch)
 logger.addHandler(fh)
 
+dfh = logging.FileHandler("../logs/pynamics365_client_windows.log")
+dfh.setLevel(logging.DEBUG)
+dfh.setFormatter(
+    logging.Formatter("%(asctime)s\t%(name)s\t%(levelname)s\t%(funcName)s\t%(message)s")
+)
+logger.addHandler(dfh)
 
 class DynamicsClient:
     def __init__(self, auth: DynamicsAuth = None, **kwargs):
@@ -45,7 +63,7 @@ class DynamicsClient:
         self.headers = {
             "Authorization": self.auth_token,
             "Content-Type": "application/json",
-            "Prefer": "odata.include-annotations=\"*\"",
+            "Prefer": 'odata.include-annotations="*"',
             "Prefer": "odata.maxpagesize=1000",
             "OData-MaxVersion": "4.0",
             "OData-Version": "4.0",
@@ -54,7 +72,7 @@ class DynamicsClient:
     def _set_environment(self):
         resource_url = urlparse(self.auth.resource)
         # Replace periods with underscores
-        return resource_url.netloc.replace('.', '_')
+        return resource_url.netloc.replace(".", "_")
 
     def get(self, url, params=None, **kwargs):
         if self.token_expired():
@@ -63,13 +81,17 @@ class DynamicsClient:
             return requests.get(url, headers=self.headers, params=params, **kwargs)
         except requests.exceptions.MissingSchema:
             logger.exception(f"Missing schema for url: {url}")
-            return requests.get(f"{self.base_url}/{url}", headers=self.headers, params=params, **kwargs)
+            return requests.get(
+                f"{self.base_url}/{url}", headers=self.headers, params=params, **kwargs
+            )
 
     async def get_async(self, url, params=None, **kwargs):
         if self.token_expired():
             self.refresh_token()
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers, params=params, **kwargs) as response:
+            async with session.get(
+                url, headers=self.headers, params=params, **kwargs
+            ) as response:
                 return await response.json()
 
     def post(self, url, data=None, **kwargs):
@@ -86,49 +108,76 @@ class DynamicsClient:
     def token_expired(self):
         return time.time() > self.expires_on
 
-    def get_entities(self, entity_name, select=None, filter=None, expand=None, top=None, orderby=None, count=False):
+    def get_entities(
+        self,
+        entity_name,
+        select=None,
+        filter=None,
+        expand=None,
+        top=None,
+        orderby=None,
+        count=False,
+    ):
         url = f"{self.base_url}/{entity_name}"
         params = {}
         if select:
-            params['$select'] = select
+            params["$select"] = select
         if filter:
-            params['$filter'] = filter
+            params["$filter"] = filter
         if expand:
-            params['$expand'] = expand
+            params["$expand"] = expand
         if top:
-            params['$top'] = top
+            params["$top"] = top
         if orderby:
-            params['$orderby'] = orderby
+            params["$orderby"] = orderby
         if count:
-            params['$count'] = count
+            params["$count"] = count
         response = self.get(url, params=params)
         response.raise_for_status()
         return response.json()
 
-    def get_entity(self, entity_name, entity_id, select=None, filter=None, expand=None, top=None, orderby=None,
-                   count=False):
+    def get_entity(
+        self,
+        entity_name,
+        entity_id,
+        select=None,
+        filter=None,
+        expand=None,
+        top=None,
+        orderby=None,
+        count=False,
+    ):
         url = f"{self.base_url}/{entity_name}({entity_id})"
         params = {}
         if select:
-            params['$select'] = select
+            params["$select"] = select
         if filter:
-            params['$filter'] = filter
+            params["$filter"] = filter
         if expand:
-            params['$expand'] = expand
+            params["$expand"] = expand
         if top:
-            params['$top'] = top
+            params["$top"] = top
         if orderby:
-            params['$orderby'] = orderby
+            params["$orderby"] = orderby
         if count:
-            params['$count'] = count
+            params["$count"] = count
         response = self.get(url, params=params)
         response.raise_for_status()
         return response.json()
 
 
 class DynamicsSession(requests.Session):
-    def __init__(self, auth_url=None, grant_type="password", resource=None, client_id=None, username=None,
-                 password=None, token_path="./token.json", **kwargs):
+    def __init__(
+        self,
+        auth_url=None,
+        grant_type="password",
+        resource=None,
+        client_id=None,
+        username=None,
+        password=None,
+        token_path="./token.json",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.auth_url = auth_url or os.getenv("MSDYN_AUTH_URL")
         self.grant_type = grant_type
@@ -138,11 +187,14 @@ class DynamicsSession(requests.Session):
         self.username = username or os.getenv("MSDYN_USERNAME")
         self.password = password or os.getenv("MSDYN_PASSWORD")
         self.token_path = token_path
-        self.page_size = kwargs.get('page_size', 1000)
+        self.page_size = kwargs.get("page_size", 1000)
+        self.resource_path_name = urlparse(self.base_url).hostname.replace(".", "_")
         self.token = None
         self._load_token()
         self._set_auth_headers()
         self._set_odata_headers()
+        # self.params.update({"$count": "true"})
+        ...
         # self.headers = {}
 
     def _get_token(self):
@@ -153,7 +205,11 @@ class DynamicsSession(requests.Session):
             "username": self.username,
             "password": self.password,
         }
-        response = self.post(self.auth_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        response = self.post(
+            self.auth_url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
         response.raise_for_status()
         return response.json()
 
@@ -180,22 +236,26 @@ class DynamicsSession(requests.Session):
         token = token or self.token
         if not token:
             return True
-        return time.time() > int(token['expires_on'])
+        return time.time() > int(token["expires_on"])
 
     def _set_auth_headers(self):
         if not self.token or self._token_expired():
             self._load_token()
-        self.headers.update({
-            "Authorization": f"Bearer {self.token['access_token']}",
-        })
+        self.headers.update(
+            {
+                "Authorization": f"Bearer {self.token['access_token']}",
+            }
+        )
 
     def _set_odata_headers(self):
-        self.headers.update({
-            "Content-Type": "application/json",
-            "Prefer": f"odata.include-annotations=\"*\",odata.maxpagesize={self.page_size}",
-            "OData-MaxVersion": "4.0",
-            "OData-Version": "4.0",
-        })
+        self.headers.update(
+            {
+                "Content-Type": "application/json",
+                "Prefer": f'odata.include-annotations="*",odata.maxpagesize={self.page_size}',
+                "OData-MaxVersion": "4.0",
+                "OData-Version": "4.0",
+            }
+        )
 
     def authenticate(self, *args, **kwargs):
         # logger.debug("Authenticating")
@@ -209,7 +269,7 @@ class DynamicsSession(requests.Session):
         self._set_odata_headers()
 
     def request(self, method, url, *args, **kwargs):
-        if not url.startswith('http'):
+        if not url.startswith("http"):
             url = f"{self.base_url}/{url}"
         return super().request(method, url, **kwargs)
 
@@ -219,8 +279,8 @@ class DynamicsSession(requests.Session):
 
     def get_all_pages(self, url, params=None):
         params = params or self.params
-        params['$top'] = self.page_size
-        params['$count'] = True
+        params["$top"] = self.page_size
+        params["$count"] = True
         next_link = url
         pages = []
         while next_link:
@@ -228,25 +288,29 @@ class DynamicsSession(requests.Session):
             response.raise_for_status()
             data = response.json()
             pages.append(data)
-            next_link = data.get('@odata.nextLink', None)
+            next_link = data.get("@odata.nextLink", None)
         return pages
 
     def pages(self, url, params=None):
         params = params or self.params
         next_link = url
+        if not next_link.startswith("http"):
+            next_link = f"{self.base_url}/{next_link}"
         page_number = 0
         while next_link:
             page_number += 1
             logger.debug(f"Getting page {page_number} for {next_link}")
             try:
                 response = self.get(next_link, params=params)
+                if response.status_code == 400:
+                    response = self.get(next_link)
                 response.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 logger.error(f"Error getting page {page_number} for {next_link}: {e}")
                 return None
             data = response.json()
             yield data
-            next_link = data.get('@odata.nextLink', None)
+            next_link = data.get("@odata.nextLink", None)
         logger.debug(f"Finished getting pages for {url}")
 
     def get_all_records(self, url, params=None):
@@ -254,7 +318,7 @@ class DynamicsSession(requests.Session):
         records = []
         for page in self.pages(url, params=params):
             try:
-                records.extend(page['value'])
+                records.extend(page["value"])
             except KeyError:
                 records.append(page)
         return records
@@ -263,16 +327,24 @@ class DynamicsSession(requests.Session):
         params = params or self.params
         for page in self.pages(url, params=params):
             try:
-                yield from page['value']
+                yield from page["value"]
             except KeyError:
                 if isinstance(page, list):
                     yield from page
                 else:
                     yield page
 
+    def get_entity_definition(self):
+        url = f"{self.base_url}/EntityDefinitions(LogicalName='{self.logical_name}')"
+        response = self.dc.get(url)
+        response.raise_for_status()
+        self.entity_definition = response.json()
+        return response.json()
+
 
 def extract_all_pages_to_json(dc, entity_definition, output_path=None):
     dc.authenticate()
+    page_size = int(dc.page_size / 1000)
     candidate_names = set()
     for key, value in entity_definition.items():
         if isinstance(value, dict):
@@ -288,24 +360,66 @@ def extract_all_pages_to_json(dc, entity_definition, output_path=None):
             logger.debug(f"Found endpoint for entity: {entity_name}")
             break
     if not entity_name:
-        logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
+        logger.error(
+            f"Could not find entity name for {entity_definition['LogicalName']}"
+        )
         return None
     logger.info(f"Extracting all pages for {entity_name}")
-    resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    output_path = f"{output_path}/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
+    resource_path_name = urlparse(dc.base_url).hostname.replace(".", "_")
+    output_path = (
+        f"{output_path}/{resource_path_name}/current/json-{page_size}k/{entity_definition['LogicalName']}"
+        or f"../data/{resource_path_name}/current/json-{page_size}k"
+        f"/{entity_definition['LogicalName']}"
+    )
     output_path = Path(output_path)
     page_number = 0
     for page in dc.pages(entity_name):
-        if not page['value']:
+        if not page["value"]:
             logger.warning(f"Empty page for {entity_name}")
             continue
         page_number += 1
         logger.info(f"{entity_name}: Extracting page {page_number}")
-        output_file = output_path / f"{entity_definition['LogicalName']}-extract-page-{page_number}.json"
+        output_file = (
+            output_path
+            / f"{entity_definition['LogicalName']}-extract-page-{page_number}.json"
+        )
         output_file.parent.mkdir(parents=True, exist_ok=True)
         with open(output_file, "w") as f:
             json.dump(page, f, indent=2)
     return output_path.name
+
+
+def get_all_records(dc, entity_definition):
+    dc.authenticate()
+    page_size = int(dc.page_size / 1000)
+    candidate_names = set()
+    for key, value in entity_definition.items():
+        if isinstance(value, dict):
+            continue
+        if "Name" in key and value:
+            candidate_names.add(value.lower())
+    entity_name = None
+    # Sort candidate names by length descending
+    for name in sorted(candidate_names, key=len, reverse=True):
+        one_record = dc.get(name, params={"$top": 1})
+        if one_record.status_code == 200:
+            entity_name = name
+            logger.debug(f"Found endpoint for entity: {entity_name}")
+            break
+    if not entity_name:
+        logger.error(
+            f"Could not find entity name for {entity_definition['LogicalName']}"
+        )
+        return None
+    logger.info(f"Extracting all pages for {entity_name}")
+    page_number = 0
+    for page in dc.pages(entity_name):
+        if not page["value"]:
+            logger.warning(f"Empty page for {entity_name}")
+            break
+        page_number += 1
+        logger.info(f"{entity_name}: Extracting page {page_number}")
+        return page["value"]
 
 
 def prepare_key_for_header(key):
@@ -321,6 +435,7 @@ def prepare_key_for_header(key):
 
 def extract_all_pages_to_csv(dc, entity_definition, output_path=None):
     dc = DynamicsSession()
+    page_size = int(dc.page_size / 1000)
     candidate_names = set()
     for key, value in entity_definition.items():
         if isinstance(value, dict):
@@ -336,41 +451,123 @@ def extract_all_pages_to_csv(dc, entity_definition, output_path=None):
             logger.debug(f"Found endpoint for entity: {entity_name}")
             break
     if not entity_name:
-        logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
+        logger.error(
+            f"Could not find entity name for {entity_definition['LogicalName']}"
+        )
         return None
     logger.info(f"Extracting all pages for {entity_name}")
-    resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    output_path = f"{output_path}/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
+    resource_path_name = urlparse(dc.base_url).hostname.replace(".", "_")
+    output_path = (
+        f"{output_path}/csv/{resource_path_name}/{entity_definition['LogicalName']}"
+        or f"../data/csv" f"/{resource_path_name}/{entity_definition['LogicalName']}"
+    )
     output_path = Path(output_path)
     page_number = 0
     for page in dc.pages(entity_name):
-        if not page['value']:
+        if not page["value"]:
             logger.warning(f"Empty page for {entity_name}")
             continue
         page_number += 1
         logger.info(f"{entity_name}: Extracting page {page_number}")
-        output_file = output_path / f"{entity_definition['LogicalName']}-extract-page-{page_number}.csv"
+        output_file = (
+            output_path
+            / f"{entity_definition['LogicalName']}-extract-page-{page_number}.csv"
+        )
         output_file.parent.mkdir(parents=True, exist_ok=True)
         file_exists = output_file.exists()
-        records = page['value']
+        records = page["value"]
         with open(output_file, "w") as f:
             csv_writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-            csv_writer.writerow([prepare_key_for_header(key) for key in records[0].keys()])
+            csv_writer.writerow(
+                [prepare_key_for_header(key) for key in records[0].keys()]
+            )
             for record in records:
                 csv_writer.writerow([record[key] for key in record.keys()])
     return output_path.name
 
 
-def entity_attrs_to_csv(dc, entity_name, filename=None, **kwargs):
+def entity_attrs_to_csv(dc, entity_name, output_path=None, **kwargs):
     url = f"EntityDefinitions(LogicalName='{entity_name}')/Attributes"
-    df = pd.json_normalize(dc.get_all_records(url, **kwargs))
-    filename = filename or f"./{entity_name}.csv"
+    entity_attributes = []
+    try:
+        entity_attributes.extend(dc.get_all_records(url, params=kwargs))
+    except Exception as e:
+        logger.error(f"Could not get attributes for {entity_name}: {e}")
+        return None
+    df = pd.json_normalize(entity_attributes)
+    if not output_path:
+        output_path = Path(f"../docs/_Definitions/Attributes")
+    else:
+        output_path = (
+            Path(output_path) / dc.resource_path_name / "_Definitions/Attributes"
+        )
+    filename = output_path / f"{entity_name}-Attributes.csv"
     filename = Path(filename)
-    df.to_csv(filename, index=False, escapechar="\\")
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.set_index(
+            [
+                "EntityLogicalName",
+                "SchemaName",
+                "LogicalName",
+                "ExternalName",
+                "IsPrimaryId",
+                "IsPrimaryName",
+                "AttributeType",
+                "ColumnNumber",
+                "MaxLength",
+                "DatabaseLength",
+                "DisplayName.UserLocalizedLabel.Label",
+                "Description.UserLocalizedLabel.Label",
+            ],
+            inplace=True,
+        )
+        df.sort_values(by=["ColumnNumber"], inplace=True)
+    except KeyError as e:
+        logger.error(f"Could not set index for {entity_name}: {e}")
+
+    df.to_csv(filename, index=True, escapechar="\\")
     return filename
 
 
-def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
+def entity_defs_to_csv(dc, entity_name, output_path=None, **kwargs):
+    url = f"EntityDefinitions(LogicalName='{entity_name}')"
+    entity_attributes = []
+    try:
+        entity_attributes.extend(dc.get_all_records(url, params=kwargs))
+    except Exception as e:
+        logger.error(f"Could not get attributes for {entity_name}: {e}")
+        return None
+    df = pd.json_normalize(entity_attributes)
+    if not output_path:
+        output_path = Path(f"../docs/_Definitions/Definitions")
+    else:
+        output_path = (
+            Path(output_path) / dc.resource_path_name / "_Definitions" / "Definitions"
+        )
+    filename = output_path / f"{entity_name}-Definitions.csv"
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.set_index(
+            [
+                "LogicalName",
+                "SchemaName",
+                "LogicalCollectionName",
+                "ObjectTypeCode",
+                "IsLogicalEntity",
+                "HasActivities",
+                "TableType",
+            ],
+            inplace=True,
+        )
+    except KeyError as e:
+        logger.error(f"Could not set index for {entity_name}: {e}")
+    df.to_csv(filename, index=True, escapechar="\\")
+    return filename
+
+
+def extract_entities_to_jsonl(dc, entity_definition, output_path=None, **kwargs):
     dc.authenticate()
     candidate_names = set()
     for key, value in entity_definition.items():
@@ -387,15 +584,20 @@ def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
             logger.debug(f"Found endpoint for entity: {entity_name}")
             break
     if not entity_name:
-        logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
+        logger.error(
+            f"Could not find entity name for {entity_definition['LogicalName']}"
+        )
         return None
     logger.info(f"Extracting all records for {entity_name}")
-    resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    filename = filename or f"../data/jsonl/{resource_path_name}/{entity_definition['LogicalName']}.jsonl"
-    filename = Path(filename)
+    resource_path_name = urlparse(dc.base_url).hostname.replace(".", "_")
+    output_path = output_path or f"../data"
+    output_path = f"{output_path}/jsonl/{resource_path_name}"
+    filename = Path(output_path) / f"{entity_definition['LogicalName']}.jsonl"
     filename.parent.mkdir(parents=True, exist_ok=True)
     if entity_name is None:
-        logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
+        logger.error(
+            f"Could not find entity name for {entity_definition['LogicalName']}"
+        )
         return None
     with open(filename, "a") as f:
         for record in dc.get_all_records(entity_name, **kwargs):
@@ -407,7 +609,7 @@ def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
                 else:
                     prepared_record[key] = value
             f.write(json.dumps(prepared_record))
-            f.write('\n')
+            f.write("\n")
     # Delete filename if empty
     if filename.stat().st_size == 0:
         filename.unlink()
@@ -425,30 +627,66 @@ def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
         with open(f"{filename}.temp", "w") as f:
             f.writelines(lines)
         os.rename(f"{filename}.temp", filename)
-        # If OS is Windows use os.delete
-        if os.name == 'nt':
-            os.delete(f"{filename}.temp")
-        else:
-            os.unlink(f"{filename}.temp")
-        logger.info(f"Done deduplicating file {filename}. Removed {length_original - length_deduplicated} lines.")
+        logger.info(
+            f"Done deduplicating file {filename}. Removed {length_original - length_deduplicated} lines."
+        )
     return filename
 
 
 def main():
     dc = DynamicsSession()
-    dc.set_page_size(1000)
+    dc.set_page_size(5000)
     entity_definitions = dc.get_all_records("EntityDefinitions")
     df = pd.json_normalize(entity_definitions)
-    df.set_index('LogicalName', inplace=True)
-    df.to_csv("../docs/entity_definitions.csv")
-    output_path = "../data/mipcrm-extract/jsonl"
+    df.set_index(
+        [
+            "LogicalName",
+            "SchemaName",
+            "LogicalCollectionName",
+            "ObjectTypeCode",
+            "IsLogicalEntity",
+            "HasActivities",
+            "TableType",
+            "Description.UserLocalizedLabel.Label",
+        ],
+        inplace=True,
+    )
+    output_path = r"C:\Users\DanielLawson\OneDrive - MIP (Aust) Pty Ltd\Documents\Projects\MIP-CRM-Migration\data\mipcrm-extract"
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    definitions_path = (
+        output_path / dc.resource_path_name / "_Definitions" / "EntityDefinitions.csv"
+    )
+    definitions_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(definitions_path)
+
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
+        # random.shuffle(entity_definitions)
         for entity_definition in entity_definitions:
-            # futures.append(executor.submit(entity_attrs_to_csv, dc, entity_name))
-            futures.append(executor.submit(extract_entities_to_jsonl, dc, entity_definition))
+            futures.append(
+                executor.submit(
+                    entity_attrs_to_csv,
+                    dc,
+                    entity_definition["LogicalName"],
+                    output_path,
+                )
+            )
+            futures.append(
+                executor.submit(
+                    entity_defs_to_csv,
+                    dc,
+                    entity_definition["LogicalName"],
+                    output_path,
+                )
+            )
+            # futures.append(executor.submit(extract_entities_to_jsonl, dc, entity_definition, output_path))
             # futures.append(executor.submit(extract_all_pages_to_csv, dc, entity_definition, output_path))
-            # futures.append(executor.submit(extract_all_pages_to_json, dc, entity_definition, output_path))
+            futures.append(
+                executor.submit(
+                    extract_all_pages_to_json, dc, entity_definition, output_path
+                )
+            )
         for future in concurrent.futures.as_completed(futures):
             try:
                 logger.info(f"Completed: {future.result()}")

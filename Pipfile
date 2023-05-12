@@ -1,0 +1,37 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+pandas = "*"
+python-dotenv = "*"
+sqlalchemy = "*"
+aiofiles = "*"
+aiopath = "*"
+aiohttp = "*"
+requests = "*"
+dictdatabase = "*"
+tqdm = "*"
+splink = "*"
+pyarrow = "*"
+jupyter = "*"
+nameparser = "*"
+xlsxwriter = "*"
+xmltodict = "*"
+python-magic-bin = "*"
+lxml = "*"
+pymssql = "*"
+duckdb = "*"
+pycountry = "*"
+phonenumbers = "*"
+requests_cache = "*"
+pa = "*"
+polars = "*"
+pendulum = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.11"
+python_full_version = "3.11.1"

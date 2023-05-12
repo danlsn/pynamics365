@@ -1,4 +1,5 @@
 import csv
+import random
 import sys
 import concurrent
 import json
@@ -14,13 +15,12 @@ import aiofiles
 import pandas as pd
 # import requests_cache
 import requests
-# from rich import print
+from rich import print
 from dotenv import load_dotenv
 import logging
 from pynamics365.auth import DynamicsAuth
 
 load_dotenv()
-
 
 # requests_cache.install_cache('pynamics365_cache')
 logger = logging.getLogger(__name__)
@@ -273,6 +273,7 @@ class DynamicsSession(requests.Session):
 
 def extract_all_pages_to_json(dc, entity_definition, output_path=None):
     dc.authenticate()
+    page_size = int(dc.page_size / 1000)
     candidate_names = set()
     for key, value in entity_definition.items():
         if isinstance(value, dict):
@@ -292,7 +293,10 @@ def extract_all_pages_to_json(dc, entity_definition, output_path=None):
         return None
     logger.info(f"Extracting all pages for {entity_name}")
     resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    output_path = f"{output_path}/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
+    output_path = f"{output_path}/current/json-{page_size}k/{resource_path_name}/{entity_definition['LogicalName']}" \
+                  or \
+                  f"../data/current/json-{page_size}k" \
+                  f"/{resource_path_name}/{entity_definition['LogicalName']}"
     output_path = Path(output_path)
     page_number = 0
     for page in dc.pages(entity_name):
@@ -321,6 +325,7 @@ def prepare_key_for_header(key):
 
 def extract_all_pages_to_csv(dc, entity_definition, output_path=None):
     dc = DynamicsSession()
+    page_size = int(dc.page_size / 1000)
     candidate_names = set()
     for key, value in entity_definition.items():
         if isinstance(value, dict):
@@ -340,7 +345,8 @@ def extract_all_pages_to_csv(dc, entity_definition, output_path=None):
         return None
     logger.info(f"Extracting all pages for {entity_name}")
     resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    output_path = f"{output_path}/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/{resource_path_name}/{entity_definition['LogicalName']}"
+    output_path = f"{output_path}/csv/{resource_path_name}/{entity_definition['LogicalName']}" or f"../data/csv" \
+                                                                                                  f"/{resource_path_name}/{entity_definition['LogicalName']}"
     output_path = Path(output_path)
     page_number = 0
     for page in dc.pages(entity_name):
@@ -361,16 +367,63 @@ def extract_all_pages_to_csv(dc, entity_definition, output_path=None):
     return output_path.name
 
 
-def entity_attrs_to_csv(dc, entity_name, filename=None, **kwargs):
+def entity_attrs_to_csv(dc, entity_name, output_path=None, **kwargs):
     url = f"EntityDefinitions(LogicalName='{entity_name}')/Attributes"
-    df = pd.json_normalize(dc.get_all_records(url, **kwargs))
-    filename = filename or f"./{entity_name}.csv"
+    entity_attributes = []
+    try:
+        entity_attributes.extend(dc.get_all_records(url, params=kwargs))
+    except Exception as e:
+        logger.error(f"Could not get attributes for {entity_name}: {e}")
+        return None
+    df = pd.json_normalize(entity_attributes)
+    if not output_path:
+        output_path = Path(f"../docs/_Definitions/Attributes")
+    else:
+        output_path = Path(output_path) / "_Definitions/Attributes"
+    filename = output_path / f"{entity_name}-Attributes.csv"
     filename = Path(filename)
-    df.to_csv(filename, index=False, escapechar="\\")
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.set_index(["EntityLogicalName", "SchemaName", "LogicalName", "ExternalName", "IsPrimaryId", "IsPrimaryName",
+                      "AttributeType", "ColumnNumber",
+                      "MaxLength", "DatabaseLength", "DisplayName.UserLocalizedLabel.Label",
+                      "Description.UserLocalizedLabel.Label"],
+                     inplace=True)
+        df.sort_values(by=['ColumnNumber'], inplace=True)
+    except KeyError as e:
+        logger.error(f"Could not set index for {entity_name}: {e}")
+
+    df.to_csv(filename, index=True, escapechar="\\")
     return filename
 
 
-def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
+def entity_defs_to_csv(dc, entity_name, output_path=None, **kwargs):
+    url = f"EntityDefinitions(LogicalName='{entity_name}')"
+    entity_attributes = []
+    try:
+        entity_attributes.extend(dc.get_all_records(url, params=kwargs))
+    except Exception as e:
+        logger.error(f"Could not get attributes for {entity_name}: {e}")
+        return None
+    df = pd.json_normalize(entity_attributes)
+    if not output_path:
+        output_path = Path(f"../docs/_Definitions/Definitions")
+    else:
+        output_path = Path(output_path) / "_Definitions" / "Definitions"
+    filename = output_path / f"{entity_name}-Definitions.csv"
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.set_index(["LogicalName", "SchemaName", "LogicalCollectionName", "ObjectTypeCode", "IsLogicalEntity",
+                      "HasActivities", "TableType", ],
+                     inplace=True)
+    except KeyError as e:
+        logger.error(f"Could not set index for {entity_name}: {e}")
+    df.to_csv(filename, index=True, escapechar="\\")
+    return filename
+
+
+def extract_entities_to_jsonl(dc, entity_definition, output_path=None, **kwargs):
     dc.authenticate()
     candidate_names = set()
     for key, value in entity_definition.items():
@@ -391,8 +444,9 @@ def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
         return None
     logger.info(f"Extracting all records for {entity_name}")
     resource_path_name = urlparse(dc.base_url).hostname.replace('.', '_')
-    filename = filename or f"../data/jsonl/{resource_path_name}/{entity_definition['LogicalName']}.jsonl"
-    filename = Path(filename)
+    output_path = output_path or f"../data"
+    output_path = f"{output_path}/jsonl/{resource_path_name}"
+    filename = Path(output_path) / f"{entity_definition['LogicalName']}.jsonl"
     filename.parent.mkdir(parents=True, exist_ok=True)
     if entity_name is None:
         logger.error(f"Could not find entity name for {entity_definition['LogicalName']}")
@@ -425,30 +479,30 @@ def extract_entities_to_jsonl(dc, entity_definition, filename=None, **kwargs):
         with open(f"{filename}.temp", "w") as f:
             f.writelines(lines)
         os.rename(f"{filename}.temp", filename)
-        # If OS is Windows use os.delete
-        if os.name == 'nt':
-            os.delete(f"{filename}.temp")
-        else:
-            os.unlink(f"{filename}.temp")
         logger.info(f"Done deduplicating file {filename}. Removed {length_original - length_deduplicated} lines.")
     return filename
 
 
 def main():
     dc = DynamicsSession()
-    dc.set_page_size(1000)
+    dc.set_page_size(5000)
     entity_definitions = dc.get_all_records("EntityDefinitions")
     df = pd.json_normalize(entity_definitions)
-    df.set_index('LogicalName', inplace=True)
-    df.to_csv("../docs/entity_definitions.csv")
-    output_path = "../data/mipcrm-extract/jsonl"
+    df.set_index(["LogicalName", "SchemaName", "LogicalCollectionName", "ObjectTypeCode", "IsLogicalEntity",
+                  "HasActivities", "TableType", "Description.UserLocalizedLabel.Label", ],
+                 inplace=True)
+    df.to_csv("/Users/danlsn/Library/CloudStorage/OneDrive-MIP("
+              "Aust)PtyLtd/Documents/Projects/MIP-CRM-Migration/data/mipcrm-extract/_Definitions/EntityDefinitions.csv")
+    output_path = "/Users/danlsn/Library/CloudStorage/OneDrive-MIP(Aust)PtyLtd/Documents/Projects/MIP-CRM-Migration/data/mipcrm-extract"
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
+        random.shuffle(entity_definitions)
         for entity_definition in entity_definitions:
-            # futures.append(executor.submit(entity_attrs_to_csv, dc, entity_name))
-            futures.append(executor.submit(extract_entities_to_jsonl, dc, entity_definition))
+            futures.append(executor.submit(entity_attrs_to_csv, dc, entity_definition['LogicalName'], output_path))
+            futures.append(executor.submit(entity_defs_to_csv, dc, entity_definition['LogicalName'], output_path))
+            futures.append(executor.submit(extract_entities_to_jsonl, dc, entity_definition, output_path))
             # futures.append(executor.submit(extract_all_pages_to_csv, dc, entity_definition, output_path))
-            # futures.append(executor.submit(extract_all_pages_to_json, dc, entity_definition, output_path))
+            futures.append(executor.submit(extract_all_pages_to_json, dc, entity_definition, output_path))
         for future in concurrent.futures.as_completed(futures):
             try:
                 logger.info(f"Completed: {future.result()}")
